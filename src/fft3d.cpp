@@ -26,6 +26,70 @@ static void remove_directory(int handle);
 HPX_PLAIN_ACTION (add_directory);
 HPX_PLAIN_ACTION (remove_directory);
 
+void fft(std::vector<std::complex<real>*> &X, int N) {
+	std::vector<real> A(N);
+	std::vector<real> B(N);
+	for (int n = 0; n < X.size(); n++) {
+		for (int i = 0; i < N; i++) {
+			A[i] = X[n][i].real();
+			B[i] = X[n][i].imag();
+		}
+		int level = 0;
+		long long flop = 0;
+		for (auto i = N; i > 1; i >>= 1) {
+			level++;
+		}
+		if ((1 << level) != N) {
+			printf("FFT must use power of 2\n");
+			abort();
+			return;
+		}
+
+		std::vector<real> cosi(N / 2);
+		std::vector<real> sine(N / 2);
+		for (int i = 0; i < N / 2; i++) {
+			const real omega = -2.0 * M_PI * i / N;
+			cosi[i] = std::cos(omega);
+			sine[i] = std::sin(omega);
+			flop += 38;
+		}
+
+		for (auto i = 0; i < N; i++) {
+			auto j = 0;
+			int l = i;
+			for (int k = 0; k < level; k++) {
+				j = (j << 1) | (l & 1);
+				l >>= 1;
+			}
+			if (j > i) {
+				std::swap(A[i], A[j]);
+				std::swap(B[i], B[j]);
+			}
+		}
+
+		for (int P = 2; P <= N; P *= 2) {
+			const int s = N / P;
+			for (int i = 0; i < N; i += P) {
+				int k = 0;
+				for (int j = i; j < i + P / 2; j++) {
+					const auto treal = A[j + P / 2] * cosi[k] - B[j + P / 2] * sine[k];
+					const auto timag = A[j + P / 2] * sine[k] + B[j + P / 2] * cosi[k];
+					A[j + P / 2] = A[j] - treal;
+					B[j + P / 2] = B[j] - timag;
+					A[j] += treal;
+					B[j] += timag;
+					k += s;
+					flop += 10;
+				}
+			}
+		}
+		for (int i = 0; i < N; i++) {
+			reinterpret_cast<real (&)[2]>(X[n][i])[0] = A[i];
+			reinterpret_cast<real (&)[2]>(X[n][i])[1] = B[i];
+		}
+	}
+}
+
 static void init() {
 	static mutex_type mtx;
 	std::lock_guard<mutex_type> lock(mtx);
@@ -52,7 +116,18 @@ fft3d_block::fft3d_block(int N_, int blocksize_, int xi_, int yi_, int P_, int h
 	}
 }
 
-void fft3d_block::transpose_yz() {
+void fft3d_block::do_fft() {
+	std::vector<std::complex<real>*> oned;
+	oned.reserve(B * B);
+	for (int i = xi * B; i < std::min((xi + 1) * B, N); i++) {
+		for (int j = yi * B; j < std::min((yi + 1) * B, N); j++) {
+			oned.push_back(&(X(i, j, 0)));
+		}
+	}
+	fft(oned, N);
+}
+
+void fft3d_block::step1() {
 	const fft3d_directory *dir;
 	{
 		std::lock_guard<mutex_type> lock(mtx);
@@ -61,16 +136,15 @@ void fft3d_block::transpose_yz() {
 	std::vector<hpx::future<void>> futs;
 
 	int me = xi * P + yi;
-	//printf( "entering %i\n", me);
 	int l = (((me + 1) << 1) + 0) - 1;
 	int r = (((me + 1) << 1) + 1) - 1;
-//	printf( "Children %i %i %i\n", l, r, P);
 	if (l < P * P) {
-		futs.push_back(hpx::async < transpose_yz_action > (dir->blocks[l]));
+		futs.push_back(hpx::async < step1_action > (dir->blocks[l]));
 	}
 	if (r < P * P) {
-		futs.push_back(hpx::async < transpose_yz_action > (dir->blocks[r]));
+		futs.push_back(hpx::async < step1_action > (dir->blocks[r]));
 	}
+	do_fft();
 	std::vector<int> others;
 	for (int k0 = 0; k0 < M; k0 += B) {
 		array3d<std::complex<real>> sub(B * xi, k0, B * yi, B, B, B);
@@ -85,7 +159,7 @@ void fft3d_block::transpose_yz() {
 		const int oyi = k0 / B;
 		const int oii = oxi * P + oyi;
 		others.push_back(oii);
-	//	printf("%i sending to %i\n", xi * P + yi, oxi * P + oyi);
+		//	printf("%i sending to %i\n", xi * P + yi, oxi * P + oyi);
 		futs.push_back(hpx::async < send_sync_action > (dir->blocks[oii], std::move(sub), xi, yi));
 	}
 
@@ -98,8 +172,7 @@ void fft3d_block::transpose_yz() {
 	X = X0;
 }
 
-
-void fft3d_block::transpose_xz() {
+void fft3d_block::step2() {
 	const fft3d_directory *dir;
 	{
 		std::lock_guard<mutex_type> lock(mtx);
@@ -113,11 +186,12 @@ void fft3d_block::transpose_xz() {
 	int r = (((me + 1) << 1) + 1) - 1;
 //	printf( "Children %i %i %i\n", l, r, P);
 	if (l < P * P) {
-		futs.push_back(hpx::async < transpose_xz_action > (dir->blocks[l]));
+		futs.push_back(hpx::async < step2_action > (dir->blocks[l]));
 	}
 	if (r < P * P) {
-		futs.push_back(hpx::async < transpose_xz_action > (dir->blocks[r]));
+		futs.push_back(hpx::async < step2_action > (dir->blocks[r]));
 	}
+	do_fft();
 	std::vector<int> others;
 	for (int k0 = 0; k0 < M; k0 += B) {
 		array3d<std::complex<real>> sub(k0, B * yi, B * xi, B, B, B);
@@ -132,8 +206,51 @@ void fft3d_block::transpose_xz() {
 		const int oyi = yi;
 		const int oii = oxi * P + oyi;
 		others.push_back(oii);
-	//	printf("%i sending to %i\n", xi * P + yi, oxi * P + oyi);
+		//	printf("%i sending to %i\n", xi * P + yi, oxi * P + oyi);
 		futs.push_back(hpx::async < send_sync_action > (dir->blocks[oii], std::move(sub), xi, yi));
+	}
+
+	hpx::wait_all(futs.begin(), futs.end());
+	for (auto i : others) {
+		futures[i].get();
+		promises[i] = hpx::promise<void>();
+		futures[i] = promises[i].get_future();
+	}
+	X = X0;
+}
+
+void fft3d_block::step3() {
+	const fft3d_directory *dir;
+	{
+		std::lock_guard<mutex_type> lock(mtx);
+		dir = &(*directories[handle]);
+	}
+	std::vector<hpx::future<void>> futs;
+
+	int me = xi * P + yi;
+	//printf( "entering %i\n", me);
+	int l = (((me + 1) << 1) + 0) - 1;
+	int r = (((me + 1) << 1) + 1) - 1;
+//	printf( "Children %i %i %i\n", l, r, P);
+	if (l < P * P) {
+		futs.push_back(hpx::async < step3_action > (dir->blocks[l]));
+	}
+	if (r < P * P) {
+		futs.push_back(hpx::async < step3_action > (dir->blocks[r]));
+	}
+	do_fft();
+	std::vector<int> others;
+	for (int k0 = 0; k0 < M; k0 += B) {
+		array3d<std::complex<real>> sub(k0, B * xi, B * yi, B, B, B);
+		for (int i = B * xi; i < B * (xi + 1); i++) {
+			for (int j = B * yi; j < B * (yi + 1); j++) {
+				for (int k = k0; k < k0 + B; k++) {
+					sub(k, i, j) = X(i, j, k);
+				}
+			}
+		}
+		others.push_back(yi * P + k0 / B);
+		futs.push_back(hpx::async < send_sync_action > (dir->blocks[k0 / B * P + xi], std::move(sub), xi, yi));
 	}
 
 	hpx::wait_all(futs.begin(), futs.end());
@@ -372,6 +489,16 @@ fft3d_server::~fft3d_server() {
 	remove_directory_action()(localities[0], handle);
 }
 
+hpx::future<void> fft3d::fft() {
+	return step1().then([this](hpx::future<void> fut) {
+		fut.get();
+		return step2().then([this](hpx::future<void> fut) {
+			fut.get();
+			return step3();
+		});
+	});
+}
+
 fft3d::fft3d(int N_) {
 	init();
 	N = N_;
@@ -382,24 +509,33 @@ fft3d::fft3d(int N_) {
 	P = tmp.P;
 }
 
-hpx::future<void> fft3d::transpose_yz() {
+hpx::future<void> fft3d::step1() {
 	const fft3d_directory *dir;
 	{
 		std::lock_guard<mutex_type> lock(mtx);
 		dir = &(*directories[handle]);
 	}
-	return hpx::async < fft3d_block::transpose_yz_action > (dir->blocks[0]);
+	return hpx::async < fft3d_block::step1_action > (dir->blocks[0]);
 
 }
 
-
-hpx::future<void> fft3d::transpose_xz() {
+hpx::future<void> fft3d::step3() {
 	const fft3d_directory *dir;
 	{
 		std::lock_guard<mutex_type> lock(mtx);
 		dir = &(*directories[handle]);
 	}
-	return hpx::async < fft3d_block::transpose_xz_action > (dir->blocks[0]);
+	return hpx::async < fft3d_block::step3_action > (dir->blocks[0]);
+
+}
+
+hpx::future<void> fft3d::step2() {
+	const fft3d_directory *dir;
+	{
+		std::lock_guard<mutex_type> lock(mtx);
+		dir = &(*directories[handle]);
+	}
+	return hpx::async < fft3d_block::step2_action > (dir->blocks[0]);
 
 }
 
@@ -492,4 +628,3 @@ hpx::future<void> fft3d::inc_subarray(const array3d<std::complex<real>> &x) {
 		hpx::wait_all(futs.begin(), futs.end());
 	}, std::move(futs));
 }
-

@@ -76,18 +76,17 @@ long long fft(std::vector<std::complex<float> > &X) {
 int hpx_main(int argc, char *argv[]) {
 	const int N = 8;
 	array3d<std::complex<real>> sub(0, 0, 0, N, N, N);
-	for (int i = 0; i < N ; i++) {
+	for (int i = 0; i < N; i++) {
 		for (int j = 0; j < N; j++) {
 			for (int k = 0; k < N; k++) {
-				sub(i, j, k) = std::complex < real > (k, k);
+				sub(i, j, k) = std::complex < real > (sin(2.0 * M_PI * k / N), 0.0);
 			}
 		}
 	}
 	fft3d test(N);
 	test.zero().get();
-	test.inc_subarray(sub);
-//	test.transpose_yz().get();
-	test.transpose_xz().get();
+	test.inc_subarray(sub).get();
+	test.fft().get();
 	test.to_silo("X").get();
 	return hpx::finalize();
 }

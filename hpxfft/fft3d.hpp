@@ -165,19 +165,23 @@ class fft3d_block: public hpx::components::component_base<fft3d_block> {
 	int P;
 	std::vector<hpx::future<void>> futures;
 	std::vector<hpx::promise<void>> promises;
+
+	void do_fft();
 public:
 	fft3d_block(int N, int blockdim, int yi, int zi, int P, int handle);
-	void transpose_yz();
-	void transpose_xz();
+	void step1();
+	void step2();
+	void step3();
 	void to_silo(std::string);
 	void send(array3d<std::complex<real>>);
 	void send_inc(array3d<std::complex<real>>);
 	void send_sync(array3d<std::complex<real>>, int, int);
 	void zero();
+	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,step3);
 	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,send_inc);
 	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,zero);
-	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,transpose_yz);
-	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,transpose_xz);
+	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,step1);
+	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,step2);
 	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,send);
 	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,send_sync);
 	HPX_DEFINE_COMPONENT_ACTION(fft3d_block,to_silo);
@@ -231,10 +235,12 @@ class fft3d {
 	int N;
 	int B;
 	int P;
+	hpx::future<void> step1();
+	hpx::future<void> step2();
+	hpx::future<void> step3();
 public:
 	fft3d(int N);
-	hpx::future<void> transpose_yz();
-	hpx::future<void> transpose_xz();
+	hpx::future<void> fft();
 	hpx::future<void> zero();
 	hpx::future<void> to_silo(std::string);
 	hpx::future<void> inc_subarray(const array3d<std::complex<real>>&);
